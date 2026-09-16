@@ -1,0 +1,75 @@
+"""Markowitz mean-variance optimization (requires numpy and cvxpy)."""
+
+import numpy as np
+import cvxpy as cp
+
+
+def markowitz_portfolio(expected_returns, covariance, risk_aversion=1.0):
+    """Find a fully invested, long-only mean-variance portfolio.
+
+    Maximize mu @ w - risk_aversion / 2 * w.T @ covariance @ w,
+    subject to sum(w) == 1 and w >= 0.
+
+    expected_returns: One-dimensional vector of expected simple returns.
+    covariance: Covariance matrix in the same asset order and time period
+        as expected_returns. Use decimals (e.g. 0.08 for an 8% return).
+    risk_aversion: Nonnegative finite number; larger values favor lower
+        variance. Zero selects a maximum-expected-return portfolio.
+
+    Returns a dictionary with weights, expected_return, variance, and
+    volatility. Weights follow the input asset order. Dependencies can be
+    installed with: python3 -m pip install numpy cvxpy
+    """
+    mu = np.asarray(expected_returns, dtype=float)
+    sigma = np.asarray(covariance, dtype=float)
+    if mu.ndim != 1 or mu.size == 0 or not np.isfinite(mu).all():
+        raise ValueError("expected_returns must be a nonempty finite vector.")
+    if sigma.shape != (mu.size, mu.size) or not np.isfinite(sigma).all():
+        raise ValueError("covariance must be a finite n-by-n matrix.")
+    if not np.isfinite(risk_aversion) or risk_aversion < 0:
+        raise ValueError("risk_aversion must be finite and nonnegative.")
+    if not np.allclose(sigma, sigma.T, rtol=1e-10, atol=1e-12):
+        raise ValueError("covariance must be symmetric.")
+    sigma = (sigma + sigma.T) / 2
+    eigenvalues, eigenvectors = np.linalg.eigh(sigma)
+    tolerance = 1e-10 * max(1.0, np.max(np.abs(eigenvalues)))
+    if eigenvalues.min() < -tolerance:
+        raise ValueError("covariance must be positive semidefinite.")
+    # Correct only tiny negative eigenvalues caused by floating-point noise.
+    sigma = (eigenvectors * np.maximum(eigenvalues, 0)) @ eigenvectors.T
+
+    w = cp.Variable(mu.size)
+    problem = cp.Problem(
+        cp.Maximize(mu @ w - risk_aversion / 2 * cp.quad_form(w, cp.psd_wrap(sigma))),
+        [cp.sum(w) == 1, w >= 0],
+    )
+    problem.solve()
+    if problem.status != cp.OPTIMAL or w.value is None:
+        raise RuntimeError(f"Portfolio optimization failed: {problem.status}")
+    weights = np.asarray(w.value).reshape(-1)
+    if (not np.isfinite(weights).all() or weights.min() < -1e-6
+            or abs(weights.sum() - 1) > 1e-6):
+        raise RuntimeError("Solver returned invalid portfolio weights.")
+    weights = np.maximum(weights, 0)
+    weights /= weights.sum()
+    variance = max(float(weights @ sigma @ weights), 0.0)
+    return {
+        "weights": weights,
+        "expected_return": float(mu @ weights),
+        "variance": variance,
+        "volatility": float(np.sqrt(variance)),
+    }
+
+
+if __name__ == "__main__":
+    # Illustrative annual expected returns and annual covariance matrix.
+    result = markowitz_portfolio(
+        expected_returns=[0.08, 0.12, 0.10],
+        covariance=[[0.04, 0.006, 0.008],
+                    [0.006, 0.09, 0.010],
+                    [0.008, 0.010, 0.06]],
+        risk_aversion=3.0,
+    )
+    print("Weights:", result["weights"].round(4))
+    print(f"Expected return: {result['expected_return']:.2%}")
+    print(f"Volatility: {result['volatility']:.2%}")
